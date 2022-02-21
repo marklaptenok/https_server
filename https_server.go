@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +49,36 @@ var (
 	//	Pool of readers.
 	buffered_readers_pool sync.Pool
 )
+
+//	HTTP 1.1 response statuses.
+var response_status = struct {
+	shit           string
+	internal_error string
+	success        string
+}{
+	shit:           "418 I'm a teapot",
+	internal_error: "500 Internal Server Error",
+	success:        "200 OK",
+}
+
+//	HTTP 1.1 response headers.
+var response_headers = struct {
+	protocol               string
+	content_type_plaintext string
+	content_type_json      string
+	content_length         string
+	date                   string
+	connection_close       string
+	delimiter              string
+}{
+	protocol:               "HTTP/1.1 ",
+	content_type_plaintext: "Content-Type: text/plain; charset=utf-8",
+	content_type_json:      "Content-Type: application/json; charset=utf-8",
+	content_length:         "Content-Length: ",
+	date:                   "Date: ",
+	connection_close:       "Connection: close",
+	delimiter:              "\r\n",
+}
 
 //	Locks and returns the close status channel (in to-receive-only mode) to caller.
 //	It's thread safe. Nobody can write or read to/from the channel until current call is satisfied.
@@ -491,13 +522,20 @@ func (server *Handle) process_connection(connection *net.Conn) {
 	}
 	logger.Debug("Server %d: connection %v: body successfully read (it's size = %d bytes)\n===== body start =====\n%s\n===== body end =====\n", server.server_id, tls_connection.RemoteAddr().String(), len(packet), packet)
 
-	const response_headers = "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"
-
 	//	If request's body is empty, sends back a normal HTTP response and terminates the connection.
 	if len(packet) == 0 {
 
-		const response_status = "418 I'm a teapot"
-		fmt.Fprintf(tls_connection, "HTTP/1.1 "+response_status+response_headers+response_status)
+		fmt.Fprintf(tls_connection,
+			response_headers.protocol+
+				response_status.shit+
+				response_headers.delimiter+
+				response_headers.content_type_plaintext+
+				response_headers.delimiter+
+				response_headers.connection_close+
+				response_headers.delimiter+
+				response_headers.delimiter+
+				response_status.shit+
+				response_headers.delimiter)
 
 		(*connection).Close()
 		tls_connection.Close()
@@ -525,6 +563,9 @@ func (server *Handle) process_connection(connection *net.Conn) {
 	for _, processor := range server.processors {
 
 		if err != nil || ctx == nil {
+			if ctx != nil {
+				ctx.Done()
+			}
 			break
 		}
 
@@ -544,19 +585,45 @@ func (server *Handle) process_connection(connection *net.Conn) {
 		logger.Warning("Server %d: connection %v: processor pipeline failed: %s", server.server_id, tls_connection.RemoteAddr().String(), err.Error())
 
 		//	Sends the report of server's error and willingness to close the connection.
-		const response_status = "500 Internal Server Error"
-		fmt.Fprintf(tls_connection, "HTTP/1.1 "+response_status+response_headers+response_status)
+
+		fmt.Fprintf(tls_connection,
+			response_headers.protocol+
+				response_status.internal_error+
+				response_headers.delimiter+
+				response_headers.content_type_plaintext+
+				response_headers.delimiter+
+				response_headers.connection_close+
+				response_headers.delimiter+
+				response_headers.delimiter+
+				response_status.internal_error+
+				response_headers.delimiter)
 
 	} else {
 
 		if result != nil {
 
-			logger.Debug("Server %d: connection %v: body successfully processed (response size = %d bytes)\n===== response body start =====\n%s\n===== response body end =====\n", server.server_id, tls_connection.RemoteAddr().String(), len(result), result)
+			logger.Debug("Server %d: connection %v: request successfully processed (response size = %d bytes)\n===== response body start =====\n%s\n===== response body end =====\n", server.server_id, tls_connection.RemoteAddr().String(), len(result), result)
 
-			//	TO-DO: send the response back.
+			fmt.Fprintf(tls_connection,
+				response_headers.protocol+
+					response_status.success+
+					response_headers.delimiter+
+					response_headers.date+time.Now().Format(http.TimeFormat)+
+					response_headers.delimiter+
+					response_headers.content_type_json+
+					response_headers.delimiter+
+					response_headers.content_length+strconv.FormatInt(int64(len(result)+4), 10)+
+					response_headers.delimiter+
+					response_headers.connection_close+
+					response_headers.delimiter+
+					response_headers.delimiter+
+					string(result)+
+					response_headers.delimiter+
+					response_headers.delimiter)
+
 		} else {
 
-			//	TO-DO: log the trouble.
+			logger.Warning("Server %d: connection %v: response is not provided", server.server_id, tls_connection.RemoteAddr().String())
 
 		}
 
@@ -581,9 +648,15 @@ func (server *Handle) serve(listener *net.Listener) error {
 			select {
 			case <-server.get_closed_channel():
 				if location, err := logger.Get_function_name(); err != nil {
-					return &logger.ClpError{uint16(server.server_id), "Server is closed", location}
+					return &logger.ClpError{
+						Code:     uint16(server.server_id),
+						Msg:      "Server is closed",
+						Location: location}
 				} else {
-					return &logger.ClpError{uint16(server.server_id), "Server is closed", ""}
+					return &logger.ClpError{
+						Code:     uint16(server.server_id),
+						Msg:      "Server is closed",
+						Location: ""}
 				}
 			default:
 			}
@@ -605,9 +678,15 @@ func (server *Handle) serve(listener *net.Listener) error {
 			//	If error is not temporary, then returns.
 			logger.Warning("Accept error: %v", err_ext)
 			if location, err := logger.Get_function_name(); err != nil {
-				return &logger.ClpError{uint16(server.server_id), "Accept failed: " + err_ext.Error(), location}
+				return &logger.ClpError{
+					Code:     uint16(server.server_id),
+					Msg:      "Accept failed: " + err_ext.Error(),
+					Location: location}
 			} else {
-				return &logger.ClpError{uint16(server.server_id), "Accept failed: " + err_ext.Error(), ""}
+				return &logger.ClpError{
+					Code:     uint16(server.server_id),
+					Msg:      "Accept failed: " + err_ext.Error(),
+					Location: ""}
 			}
 		}
 
