@@ -52,10 +52,12 @@ var (
 
 //	HTTP 1.1 response statuses.
 var response_status = struct {
+	timeout_hit    string
 	shit           string
 	internal_error string
 	success        string
 }{
+	timeout_hit:    "409 Conflict",
 	shit:           "418 I'm a teapot",
 	internal_error: "500 Internal Server Error",
 	success:        "200 OK",
@@ -584,18 +586,40 @@ func (server *Handle) process_connection(connection *net.Conn) {
 
 		logger.Warning("Server %d: connection %v: processor pipeline failed: %s", server.server_id, tls_connection.RemoteAddr().String(), err.Error())
 
+		var status = response_status.internal_error
+		var message = response_status.internal_error
+
 		//	Sends the report of server's error and willingness to close the connection.
 
+		if cloci_err, is_clp_error := err.(*logger.ClpError); is_clp_error {
+
+			switch cloci_err.Code {
+			//	Building timeout has been hit.
+			case 8:
+				status = response_status.timeout_hit
+				message = "{\n\t\"error\":41\n}"
+			//	Running the built application timeout has been hit.
+			case 14:
+				status = response_status.timeout_hit
+				message = "{\n\t\"error\":42\n}"
+			default:
+				logger.Info("Server %d: connection %v: unprocessed CLP error with code: %d", server.server_id, tls_connection.RemoteAddr().String(), cloci_err.Code)
+			}
+
+		}
+
+		//	Sends response with an error prepared above.
+		//	If none of the cases above have been fulfilled, the general error will be sent.
 		fmt.Fprintf(tls_connection,
 			response_headers.protocol+
-				response_status.internal_error+
+				status+
 				response_headers.delimiter+
 				response_headers.content_type_plaintext+
 				response_headers.delimiter+
 				response_headers.connection_close+
 				response_headers.delimiter+
 				response_headers.delimiter+
-				response_status.internal_error+
+				message+
 				response_headers.delimiter)
 
 	} else {
